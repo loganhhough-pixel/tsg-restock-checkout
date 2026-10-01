@@ -8,3 +8,5 @@ orders.json
 checkout-shots/
 # logged-in browser session (cookies): never commit
 browser-profile/
+# products you add in the dashboard
+tasks.yaml

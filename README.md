@@ -11,6 +11,19 @@ python monitor.py --check            # hit each product once: IN/out, price, lat
 python monitor.py                    # run (-v for per-check logs)
 ```
 
+## Dashboard
+```
+python monitor.py --dashboard        # opens http://127.0.0.1:8787
+```
+A control panel that runs inside the bot:
+- Every product as a card with live status, price, last check, response time, and the last checkout result (with a screenshot link).
+- Add, edit, pause, and delete products without touching YAML. Products you add there are saved to `tasks.yaml`; ones in `config.yaml` show up too but are edited in the file.
+- **Check now** and **Test checkout** (a dry run that stops before paying) on any card.
+- Auto-checkout on/off and **Dry run / Live** switches in the header. Live asks you to confirm and shows a warning banner while it's on. These switches last until you restart; set `checkout.dry_run` in config to make it permanent.
+- Running totals (restocks caught, orders, average checkout time) and a live activity feed.
+
+It only listens on your own machine (127.0.0.1), and every request needs a per-run key built into the page, so other websites in your browser can't control it. You can start with an empty config and add everything from the dashboard.
+
 ## Finding the right thing to watch
 Fastest signal is usually the JSON endpoint the product page calls for availability: open DevTools → Network → filter "Fetch/XHR", reload, look for a response with a stock field. Use `mode: json` with that URL. Otherwise use `mode: text` with regexes for the button text.
 

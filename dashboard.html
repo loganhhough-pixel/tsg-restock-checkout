@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tcg-restock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* binder vinyl + sleeves */
+  --vinyl: #1d2142;
+  --vinyl-deep: #161936;
+  --sleeve: #272c55;
+  --sleeve-edge: #3b417a;
+  --sleeve-shine: rgba(255,255,255,.07);
+  /* card stock */
+  --paper: #f1f3f9;
+  --paper-2: #e3e7f2;
+  --ink: #191b2e;
+  --ink-soft: #565b7a;
+  --on-vinyl: #e7e9f6;
+  --on-vinyl-soft: #9aa0c8;
+  /* status frames */
+  --waiting: #8f97c0;
+  --stock: #22b39f;
+  --gold: #e6b740;
+  --bad: #e0614f;
+  --paused: #6a7096;
+  --focus: #ffd75e;
+  --display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background:
+    radial-gradient(1200px 600px at 20% -10%, #262b57 0%, transparent 60%),
+    var(--vinyl);
+  color: var(--on-vinyl);
+  font: 15px/1.45 var(--body);
+  min-height: 100vh;
+}
+button, input, select { font: inherit; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+/* ---------- top bar ---------- */
+.top {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px 28px;
+  padding: 18px 28px; border-bottom: 1px solid var(--sleeve-edge);
+  background: var(--vinyl-deep);
+}
+.brand { font: 700 30px/1 var(--display); letter-spacing: .01em; margin: 0; }
+.brand small { font: 500 15px var(--body); color: var(--on-vinyl-soft); margin-left: 10px; letter-spacing: 0; }
+.tally { display: flex; gap: 22px; color: var(--on-vinyl-soft); font-size: 14px; }
+.tally b { color: var(--on-vinyl); font: 600 20px/1 var(--display); margin-right: 4px; font-variant-numeric: tabular-nums; }
+.controls { margin-left: auto; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track {
+  width: 42px; height: 24px; border-radius: 12px; background: var(--sleeve-edge);
+  position: relative; transition: background .15s;
+}
+.switch .track::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--on-vinyl); transition: transform .15s;
+}
+.switch input:checked + .track { background: var(--stock); }
+.switch input:checked + .track::after { transform: translateX(18px); }
+.switch input:focus-visible + .track { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.mode { display: inline-flex; border: 1px solid var(--sleeve-edge); border-radius: 8px; overflow: hidden; }
+.mode button {
+  background: transparent; color: var(--on-vinyl-soft); border: 0; padding: 7px 14px; cursor: pointer;
+}
+.mode button[aria-pressed="true"] { background: var(--paper); color: var(--ink); font-weight: 700; }
+.mode button.live[aria-pressed="true"] { background: var(--bad); color: #fff; }
+
+.banner {
+  margin: 0; padding: 9px 28px; font-size: 14px;
+  background: #3a1f2a; color: #ffd9d3; border-bottom: 1px solid #5c2b36;
+}
+.banner[hidden] { display: none; }
+
+/* ---------- layout ---------- */
+.layout {
+  display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 28px;
+  padding: 28px; max-width: 1500px; margin: 0 auto;
+}
+@media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+
+/* the binder page: pockets */
+.page {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 18px;
+  align-content: start;
+}
+.pocket {
+  background: linear-gradient(180deg, var(--sleeve-shine), transparent 38%), var(--sleeve);
+  border: 1px solid var(--sleeve-edge); border-radius: 12px; padding: 10px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 6px 18px rgba(5,6,20,.35);
+}
+
+/* ---------- card ---------- */
+.card {
+  --frame: var(--waiting);
+  background: var(--paper); color: var(--ink); border-radius: 8px;
+  border: 5px solid var(--frame); padding: 12px 14px 12px;
+  display: flex; flex-direction: column; gap: 10px; min-height: 100%;
+  position: relative;
+}
+.card[data-tone="stock"] { --frame: var(--stock); }
+.card[data-tone="gold"]  { --frame: var(--gold); }
+.card[data-tone="bad"]   { --frame: var(--bad); }
+.card[data-tone="paused"]{ --frame: var(--paused); }
+
+.card-head { display: flex; align-items: flex-start; gap: 10px; }
+.card-name {
+  font: 700 22px/1.05 var(--display); margin: 0; flex: 1; min-width: 0;
+  overflow-wrap: anywhere;
+}
+.card-name a { color: inherit; text-decoration: none; }
+.card-name a:hover { text-decoration: underline; }
+.kind {
+  font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+  background: var(--paper-2); color: var(--ink-soft); white-space: nowrap; margin-top: 2px;
+}
+.store { font-size: 13px; color: var(--ink-soft); margin-top: -6px; overflow-wrap: anywhere; }
+
+/* the "art box": status */
+.art {
+  border-radius: 5px; padding: 14px 12px; position: relative; overflow: hidden;
+  background: color-mix(in srgb, var(--frame) 22%, var(--paper));
+  border: 1px solid color-mix(in srgb, var(--frame) 55%, transparent);
+}
+.status { font: 700 28px/1 var(--display); position: relative; z-index: 1; }
+.status::first-letter { text-transform: uppercase; }
+.status-sub { font-size: 13px; color: var(--ink-soft); margin-top: 6px; position: relative; z-index: 1; overflow-wrap: anywhere; }
+
+/* holo foil: only when something is happening */
+.card[data-holo] .art::before {
+  content: ""; position: absolute; inset: -60%;
+  background: conic-gradient(from 0deg, #ff7ab6, #ffd36e, #7cf2c3, #6ec8ff, #b18cff, #ff7ab6);
+  opacity: .42; mix-blend-mode: multiply; filter: saturate(1.2);
+  animation: foil 3.2s linear infinite;
+}
+.card[data-holo] .art::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.75) 46%, transparent 60%);
+  background-size: 260% 100%; animation: sheen 2.2s ease-in-out infinite;
+}
+@keyframes foil { to { transform: rotate(360deg); } }
+@keyframes sheen { from { background-position: 130% 0; } to { background-position: -30% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .card[data-holo] .art::before, .card[data-holo] .art::after { animation: none; }
+}
+
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 13px; margin: 0; }
+.facts div { display: flex; flex-direction: column; }
+.facts dt { color: var(--ink-soft); }
+.facts dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.last {
+  font-size: 13px; border-top: 1px dashed #c9cee0; padding-top: 8px; color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.last strong { color: var(--ink); }
+.last a { color: var(--ink); }
+
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+.btn {
+  border: 1px solid #c3c8dc; background: #fff; color: var(--ink); border-radius: 7px;
+  padding: 6px 11px; cursor: pointer; font-size: 13px; font-weight: 700;
+}
+.btn:hover { background: var(--paper-2); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { background: #2b2e4a; }
+.btn.danger { color: #a3301f; }
+.locked { font-size: 12px; color: var(--ink-soft); align-self: center; }
+
+/* empty pocket = add */
+.add-pocket {
+  border: 2px dashed var(--sleeve-edge); border-radius: 12px; background: transparent;
+  color: var(--on-vinyl-soft); min-height: 220px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+}
+.add-pocket:hover { border-color: var(--on-vinyl-soft); color: var(--on-vinyl); }
+.add-pocket .plus { font: 600 44px/1 var(--display); }
+.add-pocket .label { font: 600 20px var(--display); }
+.add-pocket .hint { font-size: 13px; }
+
+/* ---------- activity ---------- */
+.feed {
+  background: var(--vinyl-deep); border: 1px solid var(--sleeve-edge); border-radius: 12px;
+  display: flex; flex-direction: column; max-height: calc(100vh - 150px); position: sticky; top: 20px;
+}
+@media (max-width: 1000px) { .feed { position: static; max-height: 420px; } }
+.feed h2 { font: 600 20px var(--display); margin: 0; padding: 14px 16px 10px; }
+.feed ol { list-style: none; margin: 0; padding: 0 16px 16px; overflow-y: auto; font-size: 13px; }
+.feed li { padding: 6px 0; border-top: 1px solid #262a52; display: grid; grid-template-columns: 62px 1fr; gap: 8px; }
+.feed time { color: var(--on-vinyl-soft); font-variant-numeric: tabular-nums; }
+.feed .warning span { color: #ffcf7a; }
+.feed .error span { color: #ff9c8f; }
+.feed .empty { color: var(--on-vinyl-soft); display: block; }
+
+/* ---------- dialog ---------- */
+dialog {
+  border: 0; border-radius: 12px; padding: 0; width: min(560px, calc(100vw - 32px));
+  background: var(--paper); color: var(--ink); box-shadow: 0 30px 80px rgba(0,0,0,.5);
+}
+dialog::backdrop { background: rgba(10,12,30,.6); }
+.dlg { padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; max-height: 88vh; overflow-y: auto; }
+.dlg h2 { font: 700 26px/1 var(--display); margin: 0; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-weight: 700; font-size: 14px; }
+.field .help { font-size: 12.5px; color: var(--ink-soft); }
+.field input, .field select {
+  border: 1px solid #c3c8dc; border-radius: 7px; padding: 8px 10px; background: #fff; color: var(--ink);
+}
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+fieldset { border: 1px solid #cfd4e6; border-radius: 9px; padding: 12px 14px; margin: 0; display: flex; flex-direction: column; gap: 12px; }
+legend { font: 600 17px var(--display); padding: 0 6px; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+.err { color: #a3301f; font-weight: 700; min-height: 1em; margin: 0; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; }
+[hidden] { display: none !important; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  background: var(--paper); color: var(--ink); padding: 10px 16px; border-radius: 9px;
+  font-weight: 700; box-shadow: 0 10px 30px rgba(0,0,0,.4); max-width: calc(100vw - 32px);
+}
+.toast.bad { background: #ffe1dc; color: #7a2214; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1 class="brand">tcg-restock<small id="uptime"></small></h1>
+  <div class="tally" aria-live="polite">
+    <span><b id="t-restocks">0</b>restocks caught</span>
+    <span><b id="t-orders">0</b>orders</span>
+    <span><b id="t-avg">–</b>avg checkout</span>
+    <span><b id="t-checks">0</b>checks</span>
+  </div>
+  <div class="controls">
+    <label class="switch">
+      <input type="checkbox" id="auto">
+      <span class="track" aria-hidden="true"></span>
+      <span>Auto-checkout</span>
+    </label>
+    <div class="mode" role="group" aria-label="Checkout mode">
+      <button type="button" id="m-dry" aria-pressed="true">Dry run</button>
+      <button type="button" id="m-live" class="live" aria-pressed="false">Live</button>
+    </div>
+  </div>
+</header>
+<p class="banner" id="live-banner" hidden>Live mode: products with auto-checkout will place real orders when they restock.</p>
+<p class="banner" id="conn-banner" hidden>Lost connection to the bot. Is it still running?</p>
+
+<main class="layout">
+  <section aria-label="Products">
+    <div class="page" id="page"></div>
+  </section>
+  <aside class="feed" aria-label="Activity">
+    <h2>Activity</h2>
+    <ol id="feed"><li class="empty"><span>Nothing yet.</span></li></ol>
+  </aside>
+</main>
+
+<dialog id="dlg">
+  <form class="dlg" id="form" method="dialog" novalidate>
+    <h2 id="dlg-title">Add a product</h2>
+    <div class="field">
+      <label for="f-name">Name</label>
+      <input id="f-name" name="name" required placeholder="Surging Sparks ETB">
+    </div>
+    <div class="field">
+      <label for="f-url">Product URL</label>
+      <input id="f-url" name="url" type="url" required placeholder="https://shop.example.com/products/...">
+    </div>
+    <div class="field">
+      <label for="f-mode">How to check stock</label>
+      <select id="f-mode" name="mode">
+        <option value="shopify">Shopify store (fastest, checks every 3s)</option>
+        <option value="text">Look for words on the page</option>
+        <option value="json">Read a stock API (JSON)</option>
+      </select>
+    </div>
+
+    <div class="field" data-for="shopify">
+      <label for="f-variant">Variant ID <span class="help">(optional)</span></label>
+      <input id="f-variant" name="variant" inputmode="numeric" placeholder="Leave blank to buy any in-stock variant">
+    </div>
+    <div class="row" data-for="text">
+      <div class="field">
+        <label for="f-in">In-stock text</label>
+        <input id="f-in" name="in_stock" placeholder="add to cart">
+      </div>
+      <div class="field">
+        <label for="f-out">Sold-out text</label>
+        <input id="f-out" name="out_of_stock" placeholder="sold out|out of stock">
+      </div>
+    </div>
+    <div class="row" data-for="json">
+      <div class="field">
+        <label for="f-path">JSON path</label>
+        <input id="f-path" name="json_path" placeholder="data.availability.status">
+      </div>
+      <div class="field">
+        <label for="f-jin">In-stock value</label>
+        <input id="f-jin" name="json_in_stock" placeholder="IN_STOCK">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="f-interval">Check every (seconds)</label>
+        <input id="f-interval" name="interval" type="number" min="3" step="1" value="3">
+        <span class="help" id="interval-help">Minimum 3s</span>
+      </div>
+      <div class="field">
+        <label for="f-maxprice">Max item price ($)</label>
+        <input id="f-maxprice" name="max_price" type="number" min="0" step="0.01" placeholder="No limit">
+      </div>
+    </div>
+
+    <fieldset>
+      <legend>Auto-checkout</legend>
+      <label class="check"><input type="checkbox" id="f-co"> Buy it automatically when it restocks</label>
+      <p class="help" id="co-warn" hidden style="margin:0">If it's already in stock when you save, it checks out right away (a real order in Live mode).</p>
+      <div class="row" id="co-fields" hidden>
+        <div class="field">
+          <label for="f-maxtotal">Max order total ($)</label>
+          <input id="f-maxtotal" type="number" min="1" step="0.01" placeholder="75.00">
+          <span class="help">Including shipping and tax. It won't buy above this.</span>
+        </div>
+        <div class="field">
+          <label for="f-qty">Quantity</label>
+          <input id="f-qty" type="number" min="1" max="10" step="1" value="1">
+          <span class="help">Shopify stores only</span>
+        </div>
+      </div>
+    </fieldset>
+
+    <p class="err" id="f-err" role="alert"></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" id="f-cancel">Cancel</button>
+      <button type="submit" class="btn primary" id="f-save">Add product</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" hidden role="status"></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money = (v) => v == null ? "–" : "$" + Number(v).toFixed(2);
+
+let state = null, seq = 0, skew = 0, editing = null;
+const rendered = new Map();   // task id -> last rendered signature
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: {"X-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {})},
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+function toast(msg, bad = false) {
+  const t = $("#toast");
+  t.textContent = msg; t.className = "toast" + (bad ? " bad" : ""); t.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.hidden = true, 3500);
+}
+
+function ago(ts) {
+  if (!ts) return "not yet";
+  const s = Math.max(0, Math.round(Date.now() / 1000 + skew - ts));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  return Math.floor(s / 3600) + "h ago";
+}
+
+/* ---------- status -> how the card looks ---------- */
+function look(t) {
+  const s = t.status;
+  const map = {
+    "out of stock": ["", "Watching for a restock"],
+    "starting": ["", "First check coming up"],
+    "in stock": ["stock", t.checkout ? "Auto-checkout is off right now" : "Alert sent"],
+    "checking out": ["stock", "Going through checkout"],
+    "ordered": ["gold", ""],
+    "dry run ok": ["gold", "Reached the order button and stopped"],
+    "already ordered": ["gold", "Order limit reached for this product"],
+    "unconfirmed": ["bad", "Clicked pay but saw no confirmation. Check your email."],
+    "failed": ["bad", ""],
+    "blocked": ["bad", "CAPTCHA or queue. Finish it in the browser window."],
+    "error": ["bad", t.last_error || ""],
+    "backing off": ["bad", "The store asked us to slow down"],
+    "over max price": ["bad", "In stock, but above your max price"],
+    "paused": ["paused", "Not checking"],
+  };
+  const [tone, sub] = map[s] || ["", ""];
+  const holo = s === "in stock" || s === "checking out";
+  return {tone, holo, sub};
+}
+
+const KIND = {shopify: "Shopify", text: "Page text", json: "Stock API"};
+
+function cardHTML(t) {
+  const L = look(t);
+  const lc = t.last_checkout;
+  let last = "";
+  if (lc) {
+    const shot = lc.screenshot ? ` <a href="/api/shot/${esc(t.id)}?token=${TOKEN}" target="_blank" rel="noopener">screenshot</a>` : "";
+    const label = {ordered: "Ordered", dry_run_ok: "Dry run passed", failed: "Checkout failed",
+                   blocked: "Checkout blocked", unconfirmed: "Order unconfirmed", skipped: "Skipped"}[lc.status] || lc.status;
+    const secs = lc.secs ? ` in ${lc.secs}s` : "";
+    last = `<div class="last"><strong>${esc(label)}${secs}</strong> <span data-ago="${lc.at}">${ago(lc.at)}</span>. ${esc(lc.detail)}${shot}</div>`;
+  }
+  const sub = L.sub || (t.status === "failed" && lc ? "See details below" : "");
+  const dashboardOwned = t.source === "dashboard";
+  const busy = t.status === "checking out";
+  return `
+  <article class="card" data-tone="${L.tone}" ${L.holo ? "data-holo" : ""} aria-label="${esc(t.name)}">
+    <div class="card-head">
+      <h3 class="card-name"><a href="${esc(t.landing)}" target="_blank" rel="noopener">${esc(t.name)}</a></h3>
+      <span class="kind">${KIND[t.mode] || esc(t.mode)}</span>
+    </div>
+    <div class="store">${esc(t.host)}</div>
+    <div class="art">
+      <div class="status">${esc(t.status)}</div>
+      ${sub ? `<div class="status-sub">${esc(sub)}</div>` : ""}
+    </div>
+    <dl class="facts">
+      <div><dt>Price</dt><dd>${money(t.price)}${t.max_price != null ? ` <span style="font-weight:400;color:var(--ink-soft)">max ${money(t.max_price)}</span>` : ""}</dd></div>
+      <div><dt>Last check</dt><dd data-ago="${t.last_check || ""}">${ago(t.last_check)}</dd></div>
+      <div><dt>Checks every</dt><dd>${Math.round(t.interval)}s</dd></div>
+      <div><dt>Response time</dt><dd>${t.p50 != null ? t.p50 + " ms" : "–"}</dd></div>
+      <div><dt>Auto-checkout</dt><dd>${t.checkout ? "On" : "Off"}</dd></div>
+      <div><dt>Restocks seen</dt><dd>${t.restocks}</dd></div>
+    </dl>
+    ${last}
+    <div class="actions">
+      ${t.paused
+        ? `<button class="btn primary" data-act="resume">Resume</button>`
+        : `<button class="btn primary" data-act="check">Check now</button>`}
+      ${t.checkout ? `<button class="btn" data-act="dryrun" ${busy ? "disabled" : ""}>Test checkout</button>` : ""}
+      ${t.paused ? "" : `<button class="btn" data-act="pause">Pause</button>`}
+      ${t.ordered ? `<button class="btn" data-act="reset" title="Allow it to buy this product again">Allow rebuy</button>` : ""}
+      ${dashboardOwned
+        ? `<button class="btn" data-act="edit">Edit</button><button class="btn danger" data-act="delete">Delete</button>`
+        : `<span class="locked">From config.yaml</span>`}
+    </div>
+  </article>`;
+}
+
+function render() {
+  const page = $("#page");
+  const ids = state.tasks.map(t => t.id);
+  // drop pockets for deleted tasks
+  for (const el of [...page.querySelectorAll(".pocket[data-id]")]) {
+    if (!ids.includes(el.dataset.id)) { el.remove(); rendered.delete(el.dataset.id); }
+  }
+  let prev = null;
+  for (const t of state.tasks) {
+    const {last_check, ...rest} = t;
+    const sig = JSON.stringify(rest) + (last_check ? "1" : "0");
+    let el = page.querySelector(`.pocket[data-id="${CSS.escape(t.id)}"]`);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "pocket"; el.dataset.id = t.id;
+      prev ? prev.after(el) : page.prepend(el);
+    }
+    if (rendered.get(t.id) !== sig) {
+      const hadFocus = el.contains(document.activeElement) && document.activeElement.dataset.act;
+      el.innerHTML = cardHTML(t);
+      rendered.set(t.id, sig);
+      if (hadFocus) el.querySelector(`[data-act="${hadFocus}"]`)?.focus();
+    }
+    prev = el;
+  }
+  let add = $("#add-pocket");
+  if (!add) {
+    add = document.createElement("button");
+    add.id = "add-pocket"; add.className = "add-pocket"; add.type = "button";
+    add.innerHTML = `<span class="plus" aria-hidden="true">+</span><span class="label">Add a product</span><span class="hint">Paste a product link to start watching it</span>`;
+    add.addEventListener("click", () => openForm(null));
+  }
+  page.append(add);
+  tickTimes();
+
+  const T = state.totals;
+  $("#t-restocks").textContent = T.restocks;
+  $("#t-orders").textContent = T.orders;
+  $("#t-avg").textContent = T.avg_checkout != null ? T.avg_checkout + "s" : "–";
+  $("#t-checks").textContent = T.checks.toLocaleString();
+  const S = state.settings;
+  $("#auto").checked = S.auto_checkout;
+  $("#m-dry").setAttribute("aria-pressed", String(S.dry_run));
+  $("#m-live").setAttribute("aria-pressed", String(!S.dry_run));
+  $("#live-banner").hidden = !(S.auto_checkout && !S.dry_run);
+}
+
+function tickTimes() {
+  for (const el of document.querySelectorAll("[data-ago]")) {
+    const ts = Number(el.dataset.ago);
+    el.textContent = ts ? ago(ts) : "not yet";
+  }
+  if (state) {
+    const up = Math.round(Date.now() / 1000 + skew - state.started);
+    $("#uptime").textContent = "running " + (up < 3600 ? Math.floor(up / 60) + "m" : Math.floor(up / 3600) + "h " + Math.floor(up % 3600 / 60) + "m");
+  }
+}
+
+function addEvents(events) {
+  if (!events.length) return;
+  const feed = $("#feed");
+  feed.querySelector(".empty")?.remove();
+  for (const e of events) {
+    const li = document.createElement("li");
+    li.className = e.level;
+    const d = new Date(e.t * 1000);
+    li.innerHTML = `<time>${d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false})}</time><span>${esc(e.msg)}</span>`;
+    feed.prepend(li);
+  }
+  while (feed.children.length > 250) feed.lastChild.remove();
+}
+
+async function poll() {
+  try {
+    const s = await api(`/api/state?after=${seq}`);
+    skew = s.now - Date.now() / 1000;
+    state = s; seq = s.seq;
+    addEvents(s.events);
+    render();
+    $("#conn-banner").hidden = true;
+  } catch (e) {
+    $("#conn-banner").hidden = false;
+  }
+  setTimeout(poll, 1000);
+}
+
+/* ---------- card buttons ---------- */
+$("#page").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("[data-act]");
+  if (!btn) return;
+  const id = btn.closest(".pocket").dataset.id;
+  const t = state.tasks.find(x => x.id === id);
+  const act = btn.dataset.act;
+  try {
+    if (act === "edit") return openForm(t);
+    if (act === "delete") {
+      if (!confirm(`Stop watching ${t.name} and delete it?`)) return;
+      await api(`/api/tasks/${id}`, {method: "DELETE"});
+      toast(`Deleted ${t.name}`);
+    } else if (act === "dryrun") {
+      await api(`/api/tasks/${id}/dryrun`, {method: "POST"});
+      toast("Testing checkout. It stops before paying.");
+    } else {
+      await api(`/api/tasks/${id}/${act}`, {method: "POST"});
+      toast({check: "Checking now", pause: `Paused ${t.name}`, resume: `Resumed ${t.name}`, reset: "It can buy this product again"}[act]);
+    }
+    rendered.delete(id);
+  } catch (e) { toast(e.message, true); }
+});
+
+/* ---------- header controls ---------- */
+$("#auto").addEventListener("change", async (e) => {
+  try { await api("/api/settings", {method: "POST", body: JSON.stringify({auto_checkout: e.target.checked})}); }
+  catch (err) { toast(err.message, true); }
+});
+$("#m-dry").addEventListener("click", async () => {
+  await api("/api/settings", {method: "POST", body: JSON.stringify({dry_run: true})});
+  toast("Dry run: checkouts stop before paying");
+});
+$("#m-live").addEventListener("click", async () => {
+  if (state?.settings.dry_run && !confirm("Switch to Live? Products with auto-checkout will place real orders and charge your card.")) return;
+  await api("/api/settings", {method: "POST", body: JSON.stringify({dry_run: false})});
+  toast("Live: checkouts will place real orders");
+});
+
+/* ---------- add / edit form ---------- */
+const form = $("#form"), dlg = $("#dlg");
+const MIN = {shopify: 3, json: 3, text: 10};
+
+function syncForm() {
+  const mode = $("#f-mode").value;
+  for (const el of form.querySelectorAll("[data-for]")) el.hidden = el.dataset.for !== mode;
+  $("#f-interval").min = MIN[mode];
+  $("#interval-help").textContent = `Minimum ${MIN[mode]}s`;
+  if (Number($("#f-interval").value) < MIN[mode]) $("#f-interval").value = MIN[mode];
+  $("#co-fields").hidden = !$("#f-co").checked;
+  $("#co-warn").hidden = !$("#f-co").checked;
+}
+$("#f-mode").addEventListener("change", syncForm);
+$("#f-co").addEventListener("change", syncForm);
+$("#f-url").addEventListener("blur", () => {
+  if (!editing && /\/products\//.test($("#f-url").value) && $("#f-mode").value !== "shopify") {
+    $("#f-mode").value = "shopify"; syncForm();
+  }
+});
+$("#f-cancel").addEventListener("click", () => dlg.close());
+
+function openForm(t) {
+  editing = t;
+  form.reset();
+  $("#f-err").textContent = "";
+  $("#dlg-title").textContent = t ? `Edit ${t.name}` : "Add a product";
+  $("#f-save").textContent = t ? "Save changes" : "Add product";
+  if (t) {
+    const p = t.product;
+    $("#f-name").value = p.name; $("#f-url").value = p.url;
+    $("#f-mode").value = p.mode || "text";
+    $("#f-variant").value = p.variant ?? "";
+    $("#f-interval").value = p.interval ?? 30;
+    $("#f-maxprice").value = p.max_price ?? "";
+    if (p.mode === "json") { $("#f-path").value = p.json_path ?? ""; $("#f-jin").value = p.in_stock ?? ""; }
+    else { $("#f-in").value = p.in_stock ?? ""; $("#f-out").value = p.out_of_stock ?? ""; }
+    const co = p.checkout;
+    $("#f-co").checked = !!co;
+    if (co && typeof co === "object") {
+      $("#f-maxtotal").value = co.max_total ?? "";
+      $("#f-qty").value = co.quantity ?? 1;
+    }
+  } else {
+    $("#f-mode").value = "shopify"; $("#f-interval").value = 3;
+  }
+  syncForm();
+  dlg.showModal();
+  $("#f-name").focus();
+}
+
+form.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const mode = $("#f-mode").value;
+  const body = {
+    name: $("#f-name").value.trim(),
+    url: $("#f-url").value.trim(),
+    mode,
+    interval: $("#f-interval").value,
+    max_price: $("#f-maxprice").value,
+  };
+  if (!body.name || !body.url) { $("#f-err").textContent = "Add a name and the product URL."; return; }
+  if (mode === "shopify") body.variant = $("#f-variant").value.trim();
+  if (mode === "text") { body.in_stock = $("#f-in").value.trim(); body.out_of_stock = $("#f-out").value.trim(); }
+  if (mode === "json") { body.json_path = $("#f-path").value.trim(); body.in_stock = $("#f-jin").value.trim(); }
+  if ($("#f-co").checked) {
+    const mt = parseFloat($("#f-maxtotal").value);
+    if (!(mt > 0)) { $("#f-err").textContent = "Set a max order total so it never overpays."; return; }
+    const qty = parseInt($("#f-qty").value || "1", 10);
+    body.checkout = {auto: true, max_total: mt, ...(qty > 1 ? {quantity: qty} : {})};
+  }
+  try {
+    if (editing) await api(`/api/tasks/${editing.id}`, {method: "PUT", body: JSON.stringify(body)});
+    else await api("/api/tasks", {method: "POST", body: JSON.stringify(body)});
+    dlg.close();
+    toast(editing ? "Saved changes" : `Watching ${body.name}`);
+    if (editing) rendered.delete(editing.id);
+  } catch (e) {
+    $("#f-err").textContent = e.message;
+  }
+});
+
+setInterval(tickTimes, 1000);
+poll();
+</script>
+</body>
+</html>

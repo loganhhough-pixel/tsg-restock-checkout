@@ -180,6 +180,7 @@ class Outcome:
     detail: str
     url: str = ""
     screenshot: str | None = None
+    secs: float | None = None
 
 
 # ---------- config ----------
@@ -359,6 +360,9 @@ class CheckoutRunner:
 
     def _record_order(self, key: str) -> None:
         self.orders[key] = self._ordered(key) + 1
+        self._save_orders()
+
+    def _save_orders(self) -> None:
         ORDERS_FILE.write_text(json.dumps(self.orders, indent=2))
 
     async def run(self, p: "Product", dry_run: bool | None = None, notify: bool = True,
@@ -377,7 +381,7 @@ class CheckoutRunner:
             self._spawn(self._park(_origin(p.landing)))   # re-park for next time
         log.info("%s: checkout %s: %s", p.name, out.status, out.detail)
         if notify and self.notifier:
-            await self._notify(p, out)
+            self._spawn(self._notify(p, out))   # don't hold up the caller on the push
         return out
 
     async def _attempt(self, p: "Product", dry: bool, variant=None) -> Outcome:
@@ -389,6 +393,7 @@ class CheckoutRunner:
                 out = await self._generic(page, p, spec, dry, run, variant)
             else:
                 out = await self._scripted(page, p, spec, dry, run)
+            out.secs = round(run.secs(), 2)
             return await self._finish(page, p, out, close=True)
         except Exception as e:
             try:

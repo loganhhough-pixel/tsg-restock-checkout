@@ -9,6 +9,13 @@ health_alert_after: 10  # get a heads-up if a product keeps failing (page change
 
 min_host_gap: 2         # min seconds between requests to the same site (robots.txt Crawl-delay raises it)
 
+# Dashboard: a control panel at http://127.0.0.1:8787 (or run with --dashboard).
+# Products you add there are saved to tasks.yaml; products below stay here.
+dashboard:
+  enabled: false
+  port: 8787
+  open_browser: true
+
 # Auto-checkout (optional). Only use on retailers whose terms allow automated buying.
 # 1) python monitor.py --login https://store.example.com/account   (sign in, save address + card)
 # 2) python monitor.py --checkout-test "Surging Sparks"            (dry run, stops before paying)

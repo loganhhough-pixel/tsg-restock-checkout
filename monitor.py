@@ -22,8 +22,10 @@ import logging
 import random
 import re
 import time
+import secrets
 import webbrowser
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -75,6 +77,13 @@ class Product:
 
 
 @dataclass
+class DashboardSettings:
+    enabled: bool = False
+    port: int = 8787
+    open_browser: bool = True         # open the dashboard in your browser on start
+
+
+@dataclass
 class Config:
     products: list[Product]
     discord_webhook: str | None = None
@@ -86,25 +95,68 @@ class Config:
     min_host_gap: float = 2.0         # min seconds between hits to one host
     user_agent: str = "tcg-restock/1.0 (personal stock alert)"
     checkout: CheckoutSettings = field(default_factory=CheckoutSettings)
+    dashboard: DashboardSettings = field(default_factory=lambda: DashboardSettings())
+
+
+TASKS_FILE = Path("tasks.yaml")   # products added from the dashboard
+
+
+def prepare_product(p: Product, checkout: CheckoutSettings) -> None:
+    """Validate a product and apply interval floors. Raises ValueError."""
+    if not p.name or not p.url:
+        raise ValueError("name and url are required")
+    if not p.url.startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    if p.mode not in MIN_INTERVAL:
+        raise ValueError(f"mode must be one of {', '.join(MIN_INTERVAL)}")
+    if p.mode == "text" and not (p.in_stock or p.out_of_stock):
+        raise ValueError("text mode needs an in_stock and/or out_of_stock pattern")
+    if p.mode == "json" and not p.json_path:
+        raise ValueError("json mode needs a json_path")
+    for pat in (p.in_stock, p.out_of_stock, p.price_regex):
+        if pat and p.mode != "json":
+            try:
+                re.compile(pat)
+            except re.error as e:
+                raise ValueError(f"bad pattern {pat!r}: {e}")
+    floor = MIN_INTERVAL[p.mode]
+    if p.interval < floor:
+        log.warning("%s: interval raised to the %ss minimum for %s mode", p.name, floor, p.mode)
+        p.interval = floor
+    if p.checkout:
+        try:
+            validate_spec(p.url, p.checkout, checkout)
+        except ValueError as e:
+            raise ValueError(f"checkout: {e}")
+
+
+def product_from_dict(d: dict) -> Product:
+    allowed = {f.name for f in fields(Product)}
+    extra = set(d) - allowed
+    if extra:
+        raise ValueError(f"unknown field(s): {', '.join(sorted(extra))}")
+    return Product(**d)
+
+
+def product_to_dict(p: Product) -> dict:
+    """Only the fields that differ from the defaults (keeps tasks.yaml tidy)."""
+    blank = Product(name="", url="")
+    return {k: v for k, v in asdict(p).items()
+            if k in ("name", "url") or v != getattr(blank, k)}
 
 
 def load_config(path: str) -> Config:
-    raw = yaml.safe_load(Path(path).read_text())
-    prods = [Product(**p) for p in raw.pop("products")]
+    raw = yaml.safe_load(Path(path).read_text()) if Path(path).exists() else {}
+    raw = raw or {}
+    prods = [Product(**p) for p in (raw.pop("products", None) or [])]
     checkout = CheckoutSettings(**(raw.pop("checkout", None) or {}))
+    dashboard = DashboardSettings(**(raw.pop("dashboard", None) or {}))
     for p in prods:
-        if p.mode not in MIN_INTERVAL:
-            raise SystemExit(f"{p.name!r}: mode must be one of {', '.join(MIN_INTERVAL)}")
-        floor = MIN_INTERVAL[p.mode]
-        if p.interval < floor:
-            log.warning("%s: interval raised to the %ss minimum for %s mode", p.name, floor, p.mode)
-            p.interval = floor
-        if p.checkout:
-            try:
-                validate_spec(p.url, p.checkout, checkout)
-            except ValueError as e:
-                raise SystemExit(f"config error in checkout for {p.name!r}: {e}")
-    return Config(products=prods, checkout=checkout, **raw)
+        try:
+            prepare_product(p, checkout)
+        except ValueError as e:
+            raise SystemExit(f"config error in {p.name!r}: {e}")
+    return Config(products=prods, checkout=checkout, dashboard=dashboard, **raw)
 
 
 # ---------- rate limiting ----------
@@ -238,6 +290,8 @@ class Notifier:
 @dataclass
 class Watch:
     product: Product
+    id: str = field(default_factory=lambda: secrets.token_hex(4))
+    source: str = "config"            # "config" (config.yaml) or "dashboard" (tasks.yaml)
     etag: str | None = None
     last_mod: str | None = None
     last_body: str | None = None
@@ -245,6 +299,40 @@ class Watch:
     errors: int = 0
     checks: int = 0
     latencies: list[float] = field(default_factory=list)
+    # live status for the dashboard
+    paused: bool = False
+    status: str = "starting"
+    last_check: float | None = None
+    price: float | None = None
+    last_error: str | None = None
+    restocks: int = 0
+    checkout: dict | None = None      # last checkout outcome
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task | None = None
+
+    def p50_ms(self) -> float | None:
+        lat = sorted(self.latencies)
+        return lat[len(lat) // 2] * 1000 if lat else None
+
+
+CHECKOUT_STATUSES = {"checking out", "ordered", "unconfirmed", "failed", "blocked", "dry run ok"}
+
+
+class EventLog(logging.Handler):
+    """Keeps recent log lines for the dashboard's activity feed."""
+
+    def __init__(self, size: int = 400):
+        super().__init__(logging.INFO)
+        self.lines: deque = deque(maxlen=size)
+        self.seq = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.seq += 1
+        self.lines.append({"seq": self.seq, "t": record.created,
+                           "level": record.levelname.lower(), "msg": record.getMessage()})
+
+    def since(self, seq: int) -> list[dict]:
+        return [e for e in self.lines if e["seq"] > seq]
 
 
 class Monitor:
@@ -255,6 +343,15 @@ class Monitor:
             json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {})
         self.checkout: CheckoutRunner | None = None
         self._tasks: set[asyncio.Task] = set()
+        self.watches: dict[str, Watch] = {}
+        self.client_: httpx.AsyncClient | None = None
+        self.notifier: Notifier | None = None
+        self.events = EventLog()
+        self.started = time.time()
+        self.checked_hosts: set[str] = set()
+        self.totals = {"restocks": 0, "orders": 0, "checkouts": 0}
+        self.checkout_secs: list[float] = []
+        self.auto_checkout = cfg.checkout.enabled   # live toggle from the dashboard
 
     def spawn(self, coro) -> None:
         t = asyncio.create_task(coro)
@@ -263,6 +360,80 @@ class Monitor:
 
     def save(self) -> None:
         STATE_FILE.write_text(json.dumps(self.state, indent=2))
+
+    # ----- task management (used by run() and the dashboard) -----
+
+    def load_dashboard_tasks(self) -> list[Product]:
+        if not TASKS_FILE.exists():
+            return []
+        out = []
+        for d in yaml.safe_load(TASKS_FILE.read_text()) or []:
+            try:
+                p = product_from_dict(d)
+                prepare_product(p, self.cfg.checkout)
+                out.append(p)
+            except (ValueError, TypeError) as e:
+                log.error("tasks.yaml: skipping %r: %s", d.get("name"), e)
+        return out
+
+    def save_dashboard_tasks(self) -> None:
+        items = [product_to_dict(w.product) for w in self.watches.values() if w.source == "dashboard"]
+        TASKS_FILE.write_text(yaml.safe_dump(items, sort_keys=False, allow_unicode=True))
+
+    def add(self, p: Product, source: str = "dashboard", wid: str | None = None) -> Watch:
+        w = Watch(p, source=source)
+        if wid:
+            w.id = wid
+        self.watches[w.id] = w
+        if self.client_ is not None:
+            w.task = asyncio.create_task(self.run_one(self.client_, self.notifier, w))
+            self.spawn(self._prepare_host(p))
+        return w
+
+    async def remove(self, wid: str) -> None:
+        w = self.watches.pop(wid)
+        if w.task:
+            w.task.cancel()
+
+    async def replace(self, wid: str, p: Product) -> Watch:
+        old = self.watches[wid]
+        await self.remove(wid)
+        return self.add(p, source=old.source, wid=wid)
+
+    async def _prepare_host(self, p: Product) -> None:
+        """robots.txt + checkout warm-up for a store we haven't seen yet."""
+        host = urlparse(p.fetch_url).netloc
+        if host not in self.checked_hosts:
+            self.checked_hosts.add(host)
+            await self.apply_robots(self.client_, [p])
+        if p.checkout and self.checkout is not None:
+            await self.checkout.warm([_origin_of(p.landing)])
+
+    async def ensure_checkout(self) -> CheckoutRunner:
+        if self.checkout is None:
+            self.checkout = CheckoutRunner(self.cfg.checkout, self.notifier)
+            await self.checkout.start()
+            self.spawn(self.checkout.keep_warm())
+        return self.checkout
+
+    async def run_checkout(self, w: Watch, variant=None, dry_run: bool | None = None) -> None:
+        p = w.product
+        runner = await self.ensure_checkout()
+        w.status = "checking out"
+        out = await runner.run(p, dry_run=dry_run, variant=variant)
+        secs = getattr(out, "secs", None)
+        w.checkout = {"status": out.status, "detail": out.detail, "at": time.time(),
+                      "secs": secs, "screenshot": out.screenshot}
+        if out.status == "ordered":
+            self.totals["orders"] += 1
+        if out.status in ("ordered", "dry_run_ok") and secs:
+            self.checkout_secs = (self.checkout_secs + [secs])[-50:]
+        self.totals["checkouts"] += out.status != "skipped"
+        w.status = {"dry_run_ok": "dry run ok", "skipped": "already ordered"}.get(out.status, out.status)
+        if out.status == "dry_run_ok" and not w.in_stock:
+            w.status = "dry run ok"
+
+    # ----- polling -----
 
     async def check(self, client: httpx.AsyncClient, w: Watch) -> CheckResult | None:
         p = w.product
@@ -279,12 +450,14 @@ class Monitor:
         r = await client.get(p.fetch_url, headers=headers)
         w.latencies = (w.latencies + [time.perf_counter() - t0])[-50:]
         w.checks += 1
+        w.last_check = time.time()
 
         if r.status_code in (403, 429):
             wait = self.limiter.punish(host)
             retry = r.headers.get("Retry-After")
             log.warning("%s: HTTP %s from %s, backing off %.0fs",
                         p.name, r.status_code, host, max(wait, float(retry or 0)))
+            w.status = "backing off"
             return None
         self.limiter.forgive(host)
 
@@ -298,25 +471,43 @@ class Monitor:
             w.last_mod = r.headers.get("Last-Modified")
         return evaluate(p, body)
 
+    async def _sleep(self, w: Watch, secs: float) -> None:
+        """Sleep, but wake early for 'Check now' / resume."""
+        try:
+            await asyncio.wait_for(w.wake.wait(), timeout=secs)
+        except asyncio.TimeoutError:
+            pass
+        w.wake.clear()
+
     async def run_one(self, client: httpx.AsyncClient, notifier: Notifier, w: Watch):
         p = w.product
         w.in_stock = self.state.get(p.url)
         health_alerted = False
-        await asyncio.sleep(random.uniform(0, min(p.interval, 5)))  # stagger start
+        await self._sleep(w, random.uniform(0, min(p.interval, 3)))  # stagger start
         while True:
+            if w.paused:
+                w.status = "paused"
+                await self._sleep(w, 3600)
+                continue
             try:
                 res = await self.check(client, w)
                 w.errors = 0
+                w.last_error = None
                 if health_alerted:
                     health_alerted = False
                     log.info("%s recovered", p.name)
                 if res is not None:
+                    if res.price is not None:
+                        w.price = res.price
                     if res.in_stock and w.in_stock is not True:
+                        w.restocks += 1
+                        self.totals["restocks"] += 1
                         if p.max_price is None or res.price is None or res.price <= p.max_price:
                             price = f" at ${res.price:.2f}" if res.price else ""
-                            auto = self.checkout is not None and bool(p.checkout)
+                            auto = self.auto_checkout and bool(p.checkout)
                             if auto:  # start checkout before anything else
-                                self.spawn(self.checkout.run(p, variant=res.variant))
+                                w.status = "checking out"
+                                self.spawn(self.run_checkout(w, variant=res.variant))
                             await notifier.send(
                                 f"IN STOCK: {p.name}",
                                 f"{p.name} is available{price}"
@@ -325,15 +516,23 @@ class Monitor:
                         else:
                             log.info("%s in stock but $%.2f > max $%.2f, skipped",
                                      p.name, res.price, p.max_price)
+                            w.status = "over max price"
                     elif not res.in_stock and w.in_stock:
                         log.info("%s went out of stock", p.name)
                     if res.in_stock != w.in_stock:
                         w.in_stock = res.in_stock
                         self.state[p.url] = res.in_stock
                         self.save()
+                    keep = w.status in CHECKOUT_STATUSES or w.status == "over max price"
+                    if not (res.in_stock and keep):
+                        w.status = "in stock" if res.in_stock else "out of stock"
                     log.debug("%s: %s", p.name, "IN" if res.in_stock else "out")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:  # network blips, parse failures
                 w.errors += 1
+                w.last_error = f"{type(e).__name__}: {e}"[:300]
+                w.status = "error"
                 log.warning("%s: %s (%d in a row)", p.name, e, w.errors)
                 if w.errors >= self.cfg.health_alert_after and not health_alerted:
                     health_alerted = True
@@ -341,16 +540,14 @@ class Monitor:
                                         f"{w.errors} failed checks in a row. Last error: {e}",
                                         p.url, urgent=False)
             backoff = min(2 ** min(w.errors, 6), 300) if w.errors else 0
-            await asyncio.sleep(p.interval * random.uniform(0.85, 1.15) + backoff)
+            await self._sleep(w, p.interval * random.uniform(0.85, 1.15) + backoff)
 
-    async def stats_loop(self, watches: list[Watch]):
+    async def stats_loop(self):
         while True:
             await asyncio.sleep(300)
-            for w in watches:
-                lat = sorted(w.latencies)
-                p50 = lat[len(lat) // 2] * 1000 if lat else 0
-                log.info("stats %-30s checks=%d p50=%.0fms stock=%s",
-                         w.product.name[:30], w.checks, p50, w.in_stock)
+            for w in list(self.watches.values()):
+                log.debug("stats %-30s checks=%d p50=%.0fms stock=%s",
+                          w.product.name[:30], w.checks, w.p50_ms() or 0, w.in_stock)
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -360,48 +557,64 @@ class Monitor:
             headers={"User-Agent": self.cfg.user_agent,
                      "Accept-Encoding": "gzip, deflate, br"})
 
-    async def apply_robots(self, client: httpx.AsyncClient) -> None:
+    async def apply_robots(self, client: httpx.AsyncClient, products=None) -> None:
         """Honor each site's robots.txt Crawl-delay as a floor on how often we poll it."""
+        products = list(products if products is not None else
+                        [w.product for w in self.watches.values()])
+
         async def one(origin: str) -> tuple[str, float | None]:
             try:
                 r = await client.get(origin + "/robots.txt", timeout=5)
                 return origin, (crawl_delay(r.text, self.cfg.user_agent) if r.status_code == 200 else None)
             except Exception:
                 return origin, None
-        origins = {f"{urlparse(p.fetch_url).scheme}://{urlparse(p.fetch_url).netloc}"
-                   for p in self.cfg.products}
+        origins = {_origin_of(p.fetch_url) for p in products}
+        self.checked_hosts |= {urlparse(o).netloc for o in origins}
         for origin, delay in await asyncio.gather(*(one(o) for o in origins)):
             if not delay:
                 continue
             host = urlparse(origin).netloc
             self.limiter.host_gap[host] = delay
-            for p in self.cfg.products:
-                if urlparse(p.fetch_url).netloc == host and p.interval < delay:
-                    p.interval = delay
+            for w in self.watches.values():
+                if urlparse(w.product.fetch_url).netloc == host and w.product.interval < delay:
+                    w.product.interval = delay
             log.info("%s asks for Crawl-delay %ss; polling it no faster than that", host, delay)
 
     async def run(self) -> None:
         async with self.client() as client:
-            notifier = Notifier(self.cfg, client)
+            self.client_ = client
+            self.notifier = notifier = Notifier(self.cfg, client)
+            log.addHandler(self.events)
+            for p in self.cfg.products:
+                self.add(p, source="config")
+            for p in self.load_dashboard_tasks():
+                self.add(p, source="dashboard")
             await self.apply_robots(client)
-            watches = [Watch(p) for p in self.cfg.products]
-            if self.cfg.checkout.enabled and any(p.checkout for p in self.cfg.products):
-                self.checkout = CheckoutRunner(self.cfg.checkout, notifier)
-                await self.checkout.start()
-                self.spawn(self.checkout.warm(
-                    f"{urlparse(p.landing).scheme}://{urlparse(p.landing).netloc}"
-                    for p in self.cfg.products if p.checkout))
-                self.spawn(self.checkout.keep_warm())
+            if self.auto_checkout and any(w.product.checkout for w in self.watches.values()):
+                await self.ensure_checkout()
+                self.spawn(self.checkout.warm(_origin_of(w.product.landing)
+                                              for w in self.watches.values() if w.product.checkout))
                 if self.cfg.checkout.dry_run:
                     log.warning("auto-checkout is in DRY RUN: it stops before placing orders. "
                                 "Set checkout.dry_run: false when --checkout-test passes.")
-            log.info("watching %d products (auto_open=%s, auto_checkout=%s)", len(watches),
-                     self.cfg.auto_open, sum(bool(p.checkout) for p in self.cfg.products)
-                     if self.checkout else 0)
+            dash = None
+            if self.cfg.dashboard.enabled:
+                from dashboard import Dashboard
+                dash = Dashboard(self, self.cfg.dashboard)
+                await dash.start()
+            log.info("watching %d products (auto_open=%s, auto_checkout=%s)", len(self.watches),
+                     self.cfg.auto_open, sum(bool(w.product.checkout) for w in self.watches.values())
+                     if self.auto_checkout else 0)
+            for w in self.watches.values():
+                w.task = asyncio.create_task(self.run_one(client, notifier, w))
             try:
-                await asyncio.gather(self.stats_loop(watches),
-                                     *(self.run_one(client, notifier, w) for w in watches))
+                await self.stats_loop()
             finally:
+                for w in self.watches.values():
+                    if w.task:
+                        w.task.cancel()
+                if dash:
+                    await dash.stop()
                 if self.checkout:
                     await self.checkout.close()
 
@@ -423,6 +636,11 @@ class Monitor:
                     return f"ERROR    {p.name}  {type(e).__name__}: {e}"
             for line in await asyncio.gather(*(one(p) for p in self.cfg.products)):
                 print(line)
+
+
+def _origin_of(url: str) -> str:
+    u = urlparse(url)
+    return f"{u.scheme}://{u.netloc}"
 
 
 def crawl_delay(robots: str, agent: str) -> float | None:
@@ -500,6 +718,8 @@ def main() -> None:
     ap.add_argument("--test-alert", action="store_true", help="send a test notification")
     ap.add_argument("--check", action="store_true",
                     help="check every product once, print results, exit (for tuning config)")
+    ap.add_argument("--dashboard", action="store_true",
+                    help="run with the local dashboard (http://127.0.0.1:8787)")
     ap.add_argument("--login", metavar="URL",
                     help="open the checkout browser profile to sign in and save address + card")
     ap.add_argument("--checkout-test", metavar="NAME",
@@ -510,6 +730,12 @@ def main() -> None:
     for noisy in ("httpx", "httpcore", "hpack", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = load_config(args.config)
+    if args.dashboard:
+        cfg.dashboard.enabled = True
+    if not cfg.products and not cfg.dashboard.enabled and not TASKS_FILE.exists() \
+            and not (args.login or args.test_alert):
+        raise SystemExit(f"no products in {args.config}. Add some, or run with --dashboard "
+                         "and add them there.")
     try:
         import uvloop  # faster event loop on Linux/macOS if installed
         uvloop.install()
