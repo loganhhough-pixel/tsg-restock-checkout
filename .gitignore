@@ -1,0 +1,10 @@
+config.yaml
+state.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+orders.json
+checkout-shots/
+# logged-in browser session (cookies): never commit
+browser-profile/

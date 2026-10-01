@@ -1,0 +1,79 @@
+# Copy to config.yaml and fill in.
+
+# Alerts: set either or both.
+discord_webhook: null   # "https://discord.com/api/webhooks/..."
+discord_mention: null   # "@everyone" or "<@&ROLE_ID>" to ping on restocks
+ntfy_topic: null        # pick a long random string, install the ntfy app, subscribe to it
+auto_open: true         # pop the buy page open in your browser the instant it restocks
+health_alert_after: 10  # get a heads-up if a product keeps failing (page changed, blocked)
+
+min_host_gap: 2         # min seconds between requests to the same site (robots.txt Crawl-delay raises it)
+
+# Auto-checkout (optional). Only use on retailers whose terms allow automated buying.
+# 1) python monitor.py --login https://store.example.com/account   (sign in, save address + card)
+# 2) python monitor.py --checkout-test "Surging Sparks"            (dry run, stops before paying)
+# 3) set dry_run: false
+checkout:
+  enabled: false
+  dry_run: true             # stop right before the `final: true` step
+  headless: false           # keep a visible window so you can take over if it stops
+  channel: null             # "chrome" to use your installed Chrome
+  step_timeout: 20          # seconds per step
+  max_orders_per_product: 1 # never buy the same product URL more than this (orders.json)
+  max_total: 75             # default cap on the checkout total for `checkout: auto` products
+  block_assets: true        # skip images/fonts/trackers while checking out (much faster pages)
+  keep_warm: 240            # ping parked store tabs this often so connections stay open (0 = off)
+
+products:
+  # FASTEST: Shopify mode. Give the normal product page URL; it polls the tiny
+  # <product>.js endpoint (allowed every 3s) and hands the in-stock variant
+  # straight to checkout, so checkout is a single cart-link jump.
+  - name: "151 Booster Bundle"
+    url: "https://somecardshop.com/products/151-booster-bundle"
+    mode: shopify
+    # variant: 44012345678901   # optional: only buy this specific variant
+    max_price: 30
+    interval: 3
+    checkout: auto
+
+  # Text mode: regex against the page HTML. out_of_stock wins if both match.
+  - name: "Surging Sparks Elite Trainer Box"
+    url: "https://www.example-store.com/product/12345"
+    mode: text
+    out_of_stock: "sold out|out of stock|notify me when available"
+    in_stock: "add to cart"
+    price_regex: '"price"\s*:\s*"?([\d.,]+)'
+    max_price: 60       # skip alerts above MSRP-ish
+    buy_url: "https://www.example-store.com/product/12345"  # where the alert lands you (optional)
+    interval: 30
+    # Easiest: `checkout: auto` works out the buttons itself on most stores
+    # (Shopify, WooCommerce, BigCommerce, most custom carts). See the next product.
+    # For a store where auto mode gets confused, spell the steps out instead:
+    # Checkout steps, run top to bottom in your logged-in browser.
+    # Actions: goto, click, fill (+value), select (+value), wait_for, check_price (+max), expect.
+    # Selectors are Playwright selectors: CSS ("#pay-button") or text ("text=Place order").
+    # Get them from DevTools: right-click the button > Inspect.
+    checkout:
+      # Shopify stores: find the variant ID (product URL + ".json", "variants"[0]."id").
+      # This builds /cart/<variant>:<quantity>, which adds to cart and jumps to checkout.
+      shopify_variant: 44012345678901
+      quantity: 1
+      steps:
+        - wait_for: "text=Pay now"                 # checkout loaded with saved info
+        - check_price: "[data-checkout-payment-due-target], .total-recap__final-price"
+          max: 70                                  # abort if total incl. shipping/tax is over this
+        - click: "button:has-text('Pay now')"
+          final: true                              # the step that places the order
+        - expect: "text=Thank you"                 # confirmation page
+          timeout: 45
+
+  # JSON mode: point at a product/availability JSON endpoint the page itself loads
+  # (find it in your browser's DevTools > Network tab).
+  - name: "Prismatic Evolutions Booster Bundle"
+    url: "https://api.example-store.com/items/67890/availability"
+    mode: json
+    json_path: "data.availability.status"
+    in_stock: "IN_STOCK"
+    interval: 45
+    buy_url: "https://www.example-store.com/product/67890"  # auto mode starts from this page
+    checkout: auto            # or: {auto: true, max_total: 60, quantity: 2}  (quantity: Shopify only)
